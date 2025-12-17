@@ -3,8 +3,27 @@ import { TF_VALIDITY_MS, TF_ORDER } from './config.js';
 import { getAllAnalyses, saveAnalysis } from './database.js';
 
 // --- FAST FALLBACK for Timeout (Free-tier 30s limit protection) ---
-export function createFallbackAnalysis(userId, detectedTf) {
-  // Graceful degradation when AI times out - return basic structure with WAIT action
+export function createFallbackAnalysis(userId, detectedTf, existingContext = null) {
+  // If we have existing context, preserve as much data as possible
+  if (existingContext && typeof existingContext === 'object') {
+    const existingData = existingContext.detailed_technical_data || existingContext;
+    return {
+      detected_tf: detectedTf || existingContext?.detected_tf || 'Unknown',
+      tfs_used_for_confluence: existingContext?.tfs_used_for_confluence || [],
+      request_update_for_tf: existingContext?.request_update_for_tf || null,
+      reasoning_trace: ['Timeout: Using cached analysis from previous successful analysis.'],
+      detailed_technical_data: {
+        trend_bias: existingData?.trend_bias || 'Unknown',
+        structure: existingData?.structure || { parent_bias: 'Unknown', market_structure: 'Unknown' },
+        value: existingData?.value || { at_key_level: false, key_levels_summary: 'Pending full analysis' },
+        trigger: existingData?.trigger || { candlestick_patterns: [], divergence: 'unknown' },
+        trade_setup: existingData?.trade_setup || { action: 'WAIT', confidence: 'Low', risk_flags: [] }
+      },
+      user_response_text: `⏳ **สถานะ: WAIT (Low)**\n⏱️ **TF ปัจจุบัน:** ${detectedTf || 'Unknown'}\n\n📌 **ข้อมูลจากการวิเคราะห์ครั้งก่อน**\nกำลังประมวลผล... กรุณารอสักครู่`
+    };
+  }
+  
+  // Fallback if no context available
   return {
     detected_tf: detectedTf || 'Unknown',
     tfs_used_for_confluence: [],

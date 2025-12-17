@@ -40,3 +40,9 @@ compatibility_flags = ["global_fetch_strictly_public", "nodejs_compat"]
 binding = "DB"
 database_name = "forexanalyze"
 database_id = "9412eca8-24a4-4281-a518-63ecd08bcc8a"  # Fill in your D1 database ID
+
+# For Workers KV - image cache and analysis state storage
+[[kv_namespaces]]
+binding = "ANALYSIS_KV"
+id = "9412eca8-24a4-4281-a518-63ecd08bcc8a"  # Replace with your KV namespace ID
+preview_id = "9412eca8-24a4-4281-a518-63ecd08bcc8a"  # Replace with your KV preview namespace ID

@@ -3,6 +3,7 @@ import { TF_VALIDITY_MS, TF_ORDER, CANCEL_TEXT, MAIN_MENU_TEXT } from './config.
 import { mainMenu, tradeStyleMenu } from './menus.js';
 import { replyText, getContentFromLine } from './line.js';
 import { analyzeChartStructured, chatWithGeminiText, analyzeTradeStyleWithGemini, reanalyzeFromDB, createFallbackAnalysis, selectRowsForTradeStyle, buildTradeStyleContext } from './ai.js';
+import { saveImageToKV, getImageFromKV, saveAnalysisStateToKV, getAnalysisStateFromKV, cleanupAnalysisFromKV } from './kv.js';
 import { getAllAnalyses, saveAnalysis, deleteAnalysis, updateAnalysisTF } from './database.js';
 import { enqueueAnalysisJob, buildQueueAckMessage, claimNextQueuedJob, requeueJob, markJobDone, markJobError, hasQueuedJobs, getUserQueueStats } from './queue.js';
 
@@ -330,40 +331,43 @@ function buildTFSetupSummary(data) {
 }
 
 function formatAnalysisSummary(data, row) {
-  const ts = row?.timestamp_readable || '-';
-  const ageMins = Math.floor(((Date.now() - (Number(row?.timestamp || 0))) || 0) / 60000);
+  const tf = normalizeTF(row?.tf) || 'Unknown';
   const setup = data?.trade_setup || data?.detailed_technical_data?.trade_setup || {};
-  const action = (setup?.action || data?.action || 'WAIT').toUpperCase();
-
-  // Reasoning: take up to 6 short bullets from reasoning_trace
-  let reasoning = [];
-  if (Array.isArray(data?.reasoning_trace) && data.reasoning_trace.length) {
-    reasoning = data.reasoning_trace.slice(0, 6);
-  } else if (typeof data?.summary_text === 'string' && data.summary_text.trim()) {
-    reasoning = [data.summary_text.trim()];
-  }
-
-  // Limit to <=10 sentences: we'll join bullets but keep concise
-  let reasoningText = reasoning.join(' | ');
-  if (!reasoningText) reasoningText = '-';
-
+  const structure = data?.structure || data?.detailed_technical_data?.structure || {};
+  const value = data?.value || data?.detailed_technical_data?.value || {};
+  const trigger = data?.trigger || data?.detailed_technical_data?.trigger || {};
+  const action = (setup?.action || 'WAIT').toUpperCase();
+  const confidence = setup?.confidence || 'Medium';
+  const tfs = (data?.tfs_used_for_confluence || []).join(', ') || 'Unknown';
   const entry = setup?.entry_zone || '-';
-  const tp = setup?.target_price || setup?.tp || '-';
-  const sl = setup?.stop_loss || setup?.sl || '-';
-  const refs = (data?.tfs_used_for_confluence || data?.tfs || []).join(', ') || '-';
+  const tp = setup?.target_price || '-';
+  const sl = setup?.stop_loss || '-';
+  
+  // Build summary in Thai format (same as image analysis)
+  const structureText = structure?.market_structure || 'Unknown';
+  const valueText = value?.key_levels_summary || 'ไม่ชัดเจน';
+  const triggerText = (trigger?.candlestick_patterns || []).length > 0 ? trigger.candlestick_patterns.join(', ') : 'ยังไม่ชัดเจน';
+  const summary = data?.user_response_text || '(ไม่มีข้อมูลสรุป)';
+  
+  // Use the same format as image analysis response
+  let lines = [];
+  lines.push(`📢 **สถานะ: ${action} (${confidence})**`);
+  lines.push(`⏱️ **TF ปัจจุบัน:** ${tf}`);
+  lines.push(`📚 **ข้อมูลประกอบ (Confluence):** ${tfs}`);
+  lines.push('');
+  lines.push(`🔍 **Top-Down Analysis:**`);
+  lines.push(`1️⃣ **Structure:** ${structureText}`);
+  lines.push(`2️⃣ **Area of Value:** ${valueText}`);
+  lines.push(`3️⃣ **Entry Trigger:** ${triggerText}`);
+  lines.push('');
+  lines.push(`🎯 **Setup:**`);
+  lines.push(`- **Entry:** ${entry}`);
+  lines.push(`- **TP:** ${tp}`);
+  lines.push(`- **SL:** ${sl}`);
+  lines.push('');
+  lines.push(`💡 **สรุป:** ${summary}`);
 
-  const note = data?.reanalysis ? ' (Re-analyzed)' : '';
-
-  const lines = [];
-  lines.push(`📌 สรุปผลวิเคราะห์ TF: ${normalizeTF(row?.tf)}${note}`);
-  lines.push(`Action: ${action}`);
-  lines.push(`Reasoning: ${reasoningText}`);
-  lines.push(`Entry Zone: ${entry}`);
-  lines.push(`TP: ${tp} | SL: ${sl}`);
-  lines.push(`Reference (Confluence TFs): ${refs}`);
-  lines.push(`Updated: ${ts} (Age ~${ageMins} นาที)`);
-
-  return lines.join('\n\n');
+  return lines.join('\n');
 }
 
 export async function handleSummaryTFRequest(userId, targetTF, replyToken, env) {
@@ -589,7 +593,10 @@ export async function handleInternalAnalyze(request, env, ctx) {
         // For TIMEOUT: Use fallback analysis to avoid losing user's image submission
         if (isTimeout) {
           console.warn('AI analysis timeout, using fallback for immediate response:', msg);
-          analysisResult = createFallbackAnalysis(userId, 'Unknown');
+          // Try to preserve data from most recent analysis
+          const recentAnalysis = existingRows?.[0];
+          const recentContext = recentAnalysis?.analysis_data ? safeParseJsonLoosely(recentAnalysis.analysis_data) : null;
+          analysisResult = createFallbackAnalysis(userId, 'Unknown', recentContext);
           // Mark as timeout but continue (don't return/retry)
           if (analysisResult) {
             analysisResult._analysis_timeout = true;
