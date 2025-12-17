@@ -365,13 +365,6 @@ async function handleEvent(event, env, ctx, requestUrl) {
         await handleSummaryTFRequest(userId, targetTF, replyToken, env);
         return;
       }
-      // --- COMMAND: RE-ANALYZE (Background DB-first re-evaluation) ---
-      if (userText === 'REANALYZE') {
-        // Start background re-analysis using DB context only
-        ctx.waitUntil(reanalyzeFromDB(userId, env, request.url));
-        await replyText(replyToken, '🔄 เริ่มทำการ Re-analyze ข้อมูลล่าสุดในฐานข้อมูล (ทำงานพื้นหลัง)\nจะอัปเดตผลและแทนที่ผลเก่าเมื่อเสร็จเรียบร้อย', env, mainMenu);
-        return;
-      }
 
       // --- MENU: MANAGE_DATA ---
       if (userText === 'MANAGE_DATA') {
@@ -1632,8 +1625,6 @@ async function handleSummaryMenuRequest(userId, replyToken, env) {
   const unique = new Map();
   rows.forEach(r => {
     const tf = normalizeTF(r.tf);
-    // Hide internal markers (e.g., _JOB) from the visible summary menu
-    if (String(tf || '').startsWith('_')) return;
     if (!unique.has(tf)) unique.set(tf, r.timestamp);
   });
 
@@ -1647,12 +1638,6 @@ async function handleSummaryMenuRequest(userId, replyToken, env) {
   quickReplyItems.push({
     type: "action",
     action: { type: "message", label: "⬅️ เมนูหลัก", text: MAIN_MENU_TEXT }
-  });
-
-  // Re-analyze (DB-first) - single-button background re-evaluation
-  quickReplyItems.unshift({
-    type: "action",
-    action: { type: "message", label: "🔄 Re-analyze (DB)", text: "REANALYZE" }
   });
 
   const msg = "📌 เลือก TF ที่ต้องการดูสรุปผลวิเคราะห์";
@@ -1677,43 +1662,6 @@ function buildTFSetupSummary(data) {
   return { entry, tp, sl, summary };
 }
 
-function formatAnalysisSummary(data, row) {
-  const ts = row?.timestamp_readable || '-';
-  const ageMins = Math.floor(((Date.now() - (Number(row?.timestamp || 0))) || 0) / 60000);
-  const setup = data?.trade_setup || data?.detailed_technical_data?.trade_setup || {};
-  const action = (setup?.action || data?.action || 'WAIT').toUpperCase();
-
-  // Reasoning: take up to 6 short bullets from reasoning_trace
-  let reasoning = [];
-  if (Array.isArray(data?.reasoning_trace) && data.reasoning_trace.length) {
-    reasoning = data.reasoning_trace.slice(0, 6);
-  } else if (typeof data?.summary_text === 'string' && data.summary_text.trim()) {
-    reasoning = [data.summary_text.trim()];
-  }
-
-  // Limit to <=10 sentences: we'll join bullets but keep concise
-  let reasoningText = reasoning.join(' | ');
-  if (!reasoningText) reasoningText = '-';
-
-  const entry = setup?.entry_zone || '-';
-  const tp = setup?.target_price || setup?.tp || '-';
-  const sl = setup?.stop_loss || setup?.sl || '-';
-  const refs = (data?.tfs_used_for_confluence || data?.tfs || []).join(', ') || '-';
-
-  const note = data?.reanalysis ? ' (Re-analyzed)' : '';
-
-  const lines = [];
-  lines.push(`📌 สรุปผลวิเคราะห์ TF: ${normalizeTF(row?.tf)}${note}`);
-  lines.push(`Action: ${action}`);
-  lines.push(`Reasoning: ${reasoningText}`);
-  lines.push(`Entry Zone: ${entry}`);
-  lines.push(`TP: ${tp} | SL: ${sl}`);
-  lines.push(`Reference (Confluence TFs): ${refs}`);
-  lines.push(`Updated: ${ts} (Age ~${ageMins} นาที)`);
-
-  return lines.join('\n\n');
-}
-
 async function handleSummaryTFRequest(userId, targetTF, replyToken, env) {
   if (!targetTF) {
     await replyText(replyToken, "⚠️ TF ไม่ถูกต้อง", env, mainMenu);
@@ -1731,16 +1679,26 @@ async function handleSummaryTFRequest(userId, targetTF, replyToken, env) {
   let data = {};
   try { data = JSON.parse(row.analysis_json || '{}'); } catch (_) { data = {}; }
 
-  const formatted = formatAnalysisSummary(data, row);
+  const { entry, tp, sl, summary } = buildTFSetupSummary(data);
+  const ageMins = Math.floor((Date.now() - row.timestamp) / 60000);
+
+  const msg =
+    `📌 สรุปผลวิเคราะห์ TF: ${targetTF}\n\n` +
+    `🎯 Setup:\n` +
+    `- Entry: ${entry}\n` +
+    `- TP: ${tp}\n` +
+    `- SL: ${sl}\n\n` +
+    `💡 สรุป: ${summary}\n\n` +
+    `🕒 Updated: ${row.timestamp_readable || '-'} (Age ~${ageMins} นาที)`;
+
   const quickReply = {
     items: [
       { type: "action", action: { type: "message", label: "📌 เลือก TF อื่น", text: "SUMMARY" } },
-      { type: "action", action: { type: "message", label: "🔄 Re-analyze (DB)", text: "REANALYZE" } },
       { type: "action", action: { type: "message", label: "⬅️ เมนูหลัก", text: MAIN_MENU_TEXT } }
     ]
   };
 
-  await replyText(replyToken, formatted, env, quickReply);
+  await replyText(replyToken, msg, env, quickReply);
 }
 
 // --- MENU: TRADE STYLE (SCALP / SWING) ---
@@ -2018,115 +1976,4 @@ function arrayBufferToBase64(buffer) {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
-}
-
-// --- DB-FIRST RE-ANALYZE (Background) ---
-async function analyzeDBStructured(userId, dbRows, env, options = {}) {
-  const modelId = getModelId(env);
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${env.GEMINI_API_KEY}`;
-
-  // Build compact DB context (HTF -> LTF)
-  const rows = (dbRows || []).slice().sort((a, b) => TF_ORDER.indexOf(normalizeTF(a.tf)) - TF_ORDER.indexOf(normalizeTF(b.tf)));
-  const lines = rows.map(r => {
-    const d = r.data || JSON.parse(r.analysis_json || '{}');
-    const tf = normalizeTF(r.tf);
-    const fresh = (r.isFresh === undefined) ? true : !!r.isFresh;
-    return `[TF ${tf}] ${fresh ? '🟢 Fresh' : '🔴 Stale'} | Updated=${r.timestamp_readable || '-'} | Trend=${d.trend_bias || '-'} | Entry=${(d.trade_setup||{}).entry_zone || '-'} | TP=${(d.trade_setup||{}).target_price || '-'} | SL=${(d.trade_setup||{}).stop_loss || '-'}`;
-  }).join('\n');
-
-  const instruction = {
-    role: 'user',
-    parts: [{ text: `Role: Expert Technical Analyst (Thai).\nTask: Re-evaluate the provided DB state for each TF listed below.\nDo NOT invent prices. Use only the given DB values. For large TFs (H4/1D/1W) you MAY request an update by returning them in request_update_for_tf.\n\nDB CONTEXT:\n${lines}\n\nOUTPUT: Return JSON ONLY with shape:\n{ "results": [ { "detected_tf": "M15", "tfs_used_for_confluence": ["H4","H1"], "request_update_for_tf": null|[...], "reasoning_trace": [...], "detailed_technical_data": {...}, "user_response_text": "..." } ] }` }]
-  };
-
-  const payload = { contents: [instruction], generationConfig: { temperature: 0.2, maxOutputTokens: Number(env.AI_MAX_OUTPUT_TOKENS || 1600) } };
-
-  const resp = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-  if (!resp.ok) {
-    const t = await resp.text().catch(() => '');
-    throw new Error(`AI API Error: ${resp.status} ${t}`);
-  }
-  const data = await resp.json();
-  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  return safeParseJsonLoosely(rawText);
-}
-
-async function reanalyzeFromDB(userId, env, requestUrl) {
-  try {
-    await initDatabase(env);
-    const all = (await getAllAnalyses(userId, env)) || [];
-    const rows = all.filter(r => !String(r.tf || '').startsWith('_'));
-
-    // Enrich freshness
-    const enriched = rows.map(r => {
-      const tf = normalizeTF(r.tf);
-      const ts = Number(r.timestamp || 0);
-      const ageMs = ts ? (Date.now() - ts) : Number.MAX_SAFE_INTEGER;
-      const maxAge = TF_VALIDITY_MS[tf];
-      const isFresh = !maxAge ? true : ageMs <= maxAge;
-      let data = {};
-      try { data = JSON.parse(r.analysis_json || '{}'); } catch (_) { data = {}; }
-      return { tf: tf, timestamp: ts, timestamp_readable: r.timestamp_readable, ageMs, isFresh, data, analysis_json: r.analysis_json };
-    });
-
-    const freshRows = enriched.filter(r => r.isFresh);
-    if (freshRows.length === 0) {
-      // Nothing fresh to re-analyze: write marker and exit
-      const now = Date.now();
-      const nowR = new Date(now).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' });
-      await saveAnalysis(userId, '_REANALYZE', now, nowR, { status: 'no_fresh_data', inspected_count: enriched.length }, env);
-      return;
-    }
-
-    // Ask LLM to re-evaluate DB context
-    const result = await analyzeDBStructured(userId, freshRows, env);
-    const results = Array.isArray(result?.results) ? result.results : [];
-
-    const now = Date.now();
-    const nowReadable = new Date(now).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' });
-
-    for (const r of results) {
-      try {
-        const detectedTF = normalizeTF(r.detected_tf || r.tf || 'Unknown');
-        const detailed = r.detailed_technical_data || r.detailed || {};
-        const toStore = {
-          detected_tf: detectedTF,
-          tfs_used_for_confluence: r.tfs_used_for_confluence || [],
-          request_update_for_tf: r.request_update_for_tf || null,
-          trend_bias: detailed.trend_bias || (detailed.structure && detailed.structure.parent_bias) || 'Unknown',
-          trade_setup: detailed.trade_setup || {},
-          reasoning_trace: r.reasoning_trace || [],
-          structure: detailed.structure || {},
-          value: detailed.value || {},
-          trigger: detailed.trigger || {},
-          indicators: detailed.indicators || {},
-          key_levels: detailed.key_levels || {},
-          raw_extraction: detailed.raw_extraction || {},
-          notes: detailed.notes || null,
-          reanalysis: true
-        };
-
-        if (Array.isArray(r.request_update_for_tf) && r.request_update_for_tf.length > 0) {
-          toStore.trade_setup = { ...(toStore.trade_setup || {}), action: 'WAIT', confidence: 'Low' };
-          const rt = Array.isArray(toStore.reasoning_trace) ? toStore.reasoning_trace : [];
-          rt.push(`Decision: WAIT (ต้องการภาพ TF เพิ่มเติม: ${r.request_update_for_tf.join(', ')})`);
-          toStore.reasoning_trace = rt;
-        }
-
-        await saveAnalysis(userId, detectedTF, now, nowReadable, toStore, env);
-      } catch (e) {
-        console.error('Failed to save reanalysis result for row:', safeError(e));
-      }
-    }
-
-    // Save summary marker
-    await saveAnalysis(userId, '_REANALYZE', now, nowReadable, { status: 'done', count: results.length, finishedAt: now }, env);
-  } catch (e) {
-    console.error('Reanalyze failed:', safeError(e));
-    try {
-      const at = Date.now();
-      const r = new Date(at).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' });
-      await saveAnalysis(userId, '_REANALYZE', at, r, { status: 'error', error: String(e?.message || e) }, env);
-    } catch (_) {}
-  }
 }
