@@ -1,8 +1,8 @@
 import { normalizeTF, safeError, inferLikelyCurrentTF, arrayBufferToBase64, promiseWithTimeout } from './utils.js';
-import { TF_VALIDITY_MS, CANCEL_TEXT, MAIN_MENU_TEXT } from './config.js';
+import { TF_VALIDITY_MS, TF_ORDER, CANCEL_TEXT, MAIN_MENU_TEXT } from './config.js';
 import { mainMenu, tradeStyleMenu } from './menus.js';
 import { replyText, getContentFromLine } from './line.js';
-import { analyzeChartStructured, chatWithGeminiText, analyzeTradeStyleWithGemini, reanalyzeFromDB, createFallbackAnalysis } from './ai.js';
+import { analyzeChartStructured, chatWithGeminiText, analyzeTradeStyleWithGemini, reanalyzeFromDB, createFallbackAnalysis, selectRowsForTradeStyle } from './ai.js';
 import { getAllAnalyses, saveAnalysis, deleteAnalysis, updateAnalysisTF } from './database.js';
 import { enqueueAnalysisJob, buildQueueAckMessage, claimNextQueuedJob, requeueJob, markJobDone, markJobError, hasQueuedJobs, getUserQueueStats } from './queue.js';
 
@@ -213,9 +213,11 @@ export async function handleStatusRequest(userId, replyToken, env) {
   let msg = "✅ สถานะข้อมูลกราฟในระบบ (กรองตามอายุ):";
   
   if (rows && rows.length > 0) {
-    rows.sort((a, b) => b.timestamp - a.timestamp);
+    // Filter out internal markers like _JOB
+    const visibleRows = rows.filter(r => !String(r.tf || '').startsWith('_'));
+    visibleRows.sort((a, b) => b.timestamp - a.timestamp);
 
-    for (const row of rows) {
+    for (const row of visibleRows) {
        const data = JSON.parse(row.analysis_json || '{}');
        const ageMs = Date.now() - row.timestamp;
        const limitMs = TF_VALIDITY_MS[normalizeTF(row.tf)];
