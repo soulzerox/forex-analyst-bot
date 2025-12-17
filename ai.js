@@ -1,4 +1,4 @@
-import { getModelId, safeParseJsonLoosely, promiseWithTimeout, normalizeTF, selectSmartContextRows, enrichRowsWithFreshness } from './utils.js';
+import { getModelId, safeParseJsonLoosely, promiseWithTimeout, normalizeTF, selectSmartContextRows } from './utils.js';
 import { TF_VALIDITY_MS, TF_ORDER } from './config.js';
 import { getAllAnalyses, saveAnalysis } from './database.js';
 
@@ -6,7 +6,7 @@ import { getAllAnalyses, saveAnalysis } from './database.js';
 
 export async function analyzeChartStructured(userId, base64Image, existingRows, env, options = {}) {
   const modelId = getModelId(env);
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${env.GEMINI_API_KEY}`;
+  const apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/' + modelId + ':generateContent?key=' + env.GEMINI_API_KEY;
   const signal = options.signal;
   const mimeType = options.mimeType || 'image/jpeg';
 
@@ -26,8 +26,7 @@ export async function analyzeChartStructured(userId, base64Image, existingRows, 
   let existingContextStr = "No valid higher timeframe data available.";
   if (contextRows.length > 0) {
     existingContextStr = "=== VALID EXISTING DATA (SMART CONTEXT: PARENT TFs ONLY) ===\n";
-    existingContextStr += `Context selection based on last-updated TF: ${likelyTf || 'Unknown'}
-`;
+    existingContextStr += "Context selection based on last-updated TF: " + (likelyTf || 'Unknown') + "\n";
     existingContextStr += "--------------------------------\n";
     contextRows.forEach(row => {
       const data = JSON.parse(row.analysis_json);
@@ -166,7 +165,7 @@ export async function analyzeChartStructured(userId, base64Image, existingRows, 
 - **SL:** [Stop]
 
 💡 **สรุป:** [Confluence + Counter-trend risk or why WAIT]."
-      }
+      `
     }]
   };
 
@@ -219,10 +218,10 @@ export async function analyzeChartStructured(userId, base64Image, existingRows, 
 
 export async function chatWithGeminiText(userId, userText, env) {
   const modelId = getModelId(env);
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${env.GEMINI_API_KEY}`;
+  const apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/' + modelId + ':generateContent?key=' + env.GEMINI_API_KEY;
 
   // 1) Detect requested TF (if any)
-  const tfRegex = /(M1|M5|M15|M30|H1|H4|1D|D1|1W|WEEK|DAY|HOUR)/i;
+  const tfRegex = new RegExp('(M1|M5|M15|M30|H1|H4|1D|D1|1W|WEEK|DAY|HOUR)', 'i');
   const match = userText.match(tfRegex);
 
   let targetTF = null;
@@ -253,9 +252,7 @@ export async function chatWithGeminiText(userId, userText, env) {
   if (targetTF) {
     const hasFresh = enriched.some(x => x.tf === targetTF && x.isFresh);
     if (!hasFresh) {
-      return `❌ ไม่พบข้อมูล ${targetTF} ที่เป็นปัจจุบัน
-
-📸 กรุณาส่งรูปกราฟ Timeframe **${targetTF}** เข้ามาก่อน เพื่อให้ผมวิเคราะห์ต่อได้ครับ`;
+      return '❌ ไม่พบข้อมูล ' + targetTF + ' ที่เป็นปัจจุบัน\n\n📸 กรุณาส่งรูปกราฟ Timeframe **' + targetTF + '** เข้ามาก่อน เพื่อให้ผมวิเคราะห์ต่อได้ครับ';
     }
   }
 
@@ -275,48 +272,28 @@ export async function chatWithGeminiText(userId, userText, env) {
       const freshness = x.isFresh ? "🟢 Fresh" : "🔴 Stale";
       const keyLevels = value?.key_levels_summary || d.key_levels?.summary || '-';
       const trig = [
-        trigger?.divergence ? `Div=${trigger.divergence}` : null,
-        Array.isArray(trigger?.candlestick_patterns) && trigger.candlestick_patterns.length ? `Patterns=${trigger.candlestick_patterns.join(',')}` : null
+        trigger?.divergence ? 'Div=' + trigger.divergence : null,
+        Array.isArray(trigger?.candlestick_patterns) && trigger.candlestick_patterns.length ? 'Patterns=' + trigger.candlestick_patterns.join(',') : null
       ].filter(Boolean).join(' | ') || '-';
 
       return [
-        `- TF ${x.tf} (${freshness}, Age=${x.ageMins}m, Updated=${x.timestamp_readable || '-'})`,
-        `  Trend=${d.trend_bias || structure?.parent_bias || 'Unknown'} | Action=${setup?.action || 'N/A'}`,
-        `  Entry=${setup?.entry_zone || '-'} | TP=${setup?.target_price || '-'} | SL=${setup?.stop_loss || '-'}`,
-        `  P1(Structure)=${structure?.market_structure || '-'} | P2(Value)=${keyLevels} | P3(Trigger)=${trig}`
+        '- TF ' + x.tf + ' (' + freshness + ', Age=' + x.ageMins + 'm, Updated=' + (x.timestamp_readable || '-') + ')',
+        '  Trend=' + (d.trend_bias || structure?.parent_bias || 'Unknown') + ' | Action=' + (setup?.action || 'N/A'),
+        '  Entry=' + (setup?.entry_zone || '-') + ' | TP=' + (setup?.target_price || '-') + ' | SL=' + (setup?.stop_loss || '-'),
+        '  P1(Structure)=' + (structure?.market_structure || '-') + ' | P2(Value)=' + keyLevels + ' | P3(Trigger)=' + trig
       ].join('\n');
     }).join('\n');
 
-    marketState = `=== CURRENT MARKET STATE (Database: ALL TFs) ===
-${lines}
-===============================================`;
+    marketState = '=== CURRENT MARKET STATE (Database: ALL TFs) ===\n' + lines + '\n===============================================';
   } else {
-    marketState = `=== CURRENT MARKET STATE ===
-No technical data available in database.
-User must upload charts first.
-================================`;
+    marketState = '=== CURRENT MARKET STATE ===\nNo technical data available in database.\nUser must upload charts first.\n================================';
 }
 
   // 6) LLM Response Generation (Hard Rules + DB-first)
   const payload = {
     contents: [{
       role: "user",
-      parts: [{ text: `
-        Role: Assistant Trader & Technical Analyst (Thai Language).
-
-        ${marketState}
-
-        User Question: "${userText}"
-
-        Hard Rules:
-        - Answer strictly based on the Database state above (no hallucinated prices/trends).
-        - Respect Top-Down: do not recommend counter-trend against the highest available Parent TF bias, unless the DB explicitly shows price at a major HTF key level + clear reversal trigger.
-        - If data is missing/stale for any critical TF to answer safely, ask the user to upload that TF.
-
-        Output format:
-        - Provide a short "🧠 ขั้นคิด (สรุปเป็นขั้น)" explaining how you used the DB (P1->P2->P3).
-        - Then provide the final answer in Thai (concise, actionable).
-      ` }]
+      parts: [{ text: 'Role: Assistant Trader & Technical Analyst (Thai Language).\n\n' + marketState + '\n\nUser Question: "' + userText + '"\n\nHard Rules:\n- Answer strictly based on the Database state above (no hallucinated prices/trends).\n- Respect Top-Down: do not recommend counter-trend against the highest available Parent TF bias, unless the DB explicitly shows price at a major HTF key level + clear reversal trigger.\n- If data is missing/stale for any critical TF to answer safely, ask the user to upload that TF.\n\nOutput format:\n- Provide a short "🧠 ขั้นคิด (สรุปเป็นขั้น)" explaining how you used the DB (P1->P2->P3).\n- Then provide the final answer in Thai (concise, actionable).\n      ' }]
     }],
     generationConfig: {
       temperature: 0.2,
@@ -341,29 +318,6 @@ User must upload charts first.
 }
 
 // --- TRADE STYLE ANALYSIS ---
-
-export function enrichRowsWithFreshness(rows) {
-  const now = Date.now();
-  return (rows || []).map(r => {
-    const tf = normalizeTF(r.tf);
-    const ts = Number(r.timestamp || 0);
-    const ageMs = ts ? (now - ts) : Number.MAX_SAFE_INTEGER;
-    const maxAge = TF_VALIDITY_MS[tf];
-    const isFresh = !maxAge ? true : ageMs <= maxAge;
-
-    let data = {};
-    try { data = JSON.parse(r.analysis_json || '{}'); } catch (_) { data = {}; }
-
-    return {
-      tf,
-      timestamp: ts,
-      timestamp_readable: r.timestamp_readable,
-      ageMins: Math.floor(ageMs / 60000),
-      isFresh,
-      data
-    };
-  });
-}
 
 function pickMostRecentRowByTF(rows, candidateTFs) {
   let best = null;
@@ -423,7 +377,7 @@ export function selectRowsForTradeStyle(validRows, mode) {
 }
 
 export function buildTradeStyleContext(enrichedSelected, mode) {
-  const header = `=== DB CONTEXT FOR ${mode} (Selected TFs Only / Smart Context) ===`;
+  const header = '=== DB CONTEXT FOR ' + mode + ' (Selected TFs Only / Smart Context) ===';
   const lines = (enrichedSelected || []).map(x => {
     const d = x.data || {};
     const detailed = d.detailed_technical_data || {};
@@ -435,13 +389,13 @@ export function buildTradeStyleContext(enrichedSelected, mode) {
 
     // Keep compact to reduce token usage
     return [
-      `[TF ${x.tf}] ${x.isFresh ? '🟢 Fresh' : '🔴 Stale'} | Age=${x.ageMins}m | Updated=${x.timestamp_readable || '-'}`,
-      `- TrendBias: ${d.trend_bias || detailed.trend_bias || '-'}`,
-      `- Structure: ${JSON.stringify(structure || {}).slice(0, 380)}`,
-      `- Value: ${JSON.stringify(value || {}).slice(0, 380)}`,
-      `- Trigger: ${JSON.stringify(trigger || {}).slice(0, 380)}`,
-      `- Indicators: ${JSON.stringify(indicators || {}).slice(0, 380)}`,
-      `- Setup: ${JSON.stringify(tradeSetup || {}).slice(0, 380)}`,
+      '[TF ' + x.tf + '] ' + (x.isFresh ? '🟢 Fresh' : '🔴 Stale') + ' | Age=' + x.ageMins + 'm | Updated=' + (x.timestamp_readable || '-'),
+      '- TrendBias: ' + (d.trend_bias || detailed.trend_bias || '-'),
+      '- Structure: ' + JSON.stringify(structure || {}).slice(0, 380),
+      '- Value: ' + JSON.stringify(value || {}).slice(0, 380),
+      '- Trigger: ' + JSON.stringify(trigger || {}).slice(0, 380),
+      '- Indicators: ' + JSON.stringify(indicators || {}).slice(0, 380),
+      '- Setup: ' + JSON.stringify(tradeSetup || {}).slice(0, 380),
       '---'
     ].join('\n');
   });
@@ -451,59 +405,16 @@ export function buildTradeStyleContext(enrichedSelected, mode) {
 
 export async function analyzeTradeStyleWithGemini(mode, contextStr, env) {
   const modelId = getModelId(env);
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${env.GEMINI_API_KEY}`;
+  const apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/' + modelId + ':generateContent?key=' + env.GEMINI_API_KEY;
 
   const modeThai = (mode === 'SCALP') ? 'เล่นสั้น (Scalp)' : 'เล่นสวิง (Swing)';
+
+  const baseText = '\nRole: Expert Technical Analyst (Thai).\nTask: Create a trading plan for mode = "' + modeThai + '" using ONLY the DB context provided.\nMethodology: Strict Top-Down (Structure -> Value -> Trigger) + Confluence.\n\n' + contextStr + '\n\n*** HARD RULES (MUST FOLLOW) ***\n1) Strict Top-Down: Direction must follow Higher TF (1D/H4) first.\n2) No counter-trend trades. Exception ONLY when price is at a clearly major Support/Resistance or key Fib zone; if exception applies, you MUST label "Counter-trend (Risky)" and reduce confidence.\n3) If price is in No Man\'s Land (no clear value zone), output action = WAIT.\n4) Indicators (RSI/MACD/Stoch/MA/Volume) are CONFIRMATION only, not direction setters.\n5) Use only what exists in DB context. If missing critical TFs for safe call, set request_update_for_tf accordingly.\n\n*** MODE-SPECIFIC GUIDANCE ***\n- SCALP: prioritize precise trigger on LTF, tight invalidation, quick TP; still filter by HTF bias.\n- SWING: prioritize HTF structure/value; TP wider; trigger can be from H1/M30.\n\n*** CHAIN-OF-THOUGHT RULE ***\nThink step-by-step internally, but do NOT reveal internal chain-of-thought. Output only the JSON below.\nIn reasoning_trace, provide SHORT bullet summary derived from PRIORITY 1/2/3 (not hidden reasoning).\n\n*** OUTPUT FORMAT (JSON ONLY) ***\n{\n  "mode": "SCALP|SWING",\n  "tfs_used_for_confluence": ["1D","H4","H1","M15"],\n  "request_update_for_tf": ["1D"] | null,\n  "reasoning_trace": [\n    "P1 Structure: ...",\n    "P2 Value: ...",\n    "P3 Trigger: ..."\n  ],\n  "trade_plan": {\n    "action": "BUY|SELL|WAIT|HOLD",\n    "entry_zone": "...",\n    "target_price": "...",\n    "stop_loss": "...",\n    "confidence": "High|Medium|Low",\n    "probability_pct": 0\n  },\n  "risk_notes": [\n    "..."\n  ],\n  "user_response_text": "Generate a concise Thai response:\\n\\n⚡ **โหมด:** ' + modeThai + '\\n📢 **สถานะ:** [ACTION] (Confidence/Probability)\\n📚 **TF ที่ใช้:** ...\\n\\n🔍 **Top-Down:**\\n1️⃣ Structure: ...\\n2️⃣ Value: ...\\n3️⃣ Trigger: ...\\n\\n🎯 **Setup:**\\n- **Entry:** ...\\n- **TP:** ...\\n- **SL:** ...\\n\\n💡 **สรุป:** ...\\n⚠️ **ความเสี่ยง:** ..."\n}\n      ';
 
   const instruction = {
     role: "user",
     parts: [{
-      text: `
-Role: Expert Technical Analyst (Thai).
-Task: Create a trading plan for mode = "${modeThai}" using ONLY the DB context provided.
-Methodology: Strict Top-Down (Structure -> Value -> Trigger) + Confluence.
-
-${contextStr}
-
-*** HARD RULES (MUST FOLLOW) ***
-1) Strict Top-Down: Direction must follow Higher TF (1D/H4) first.
-2) No counter-trend trades. Exception ONLY when price is at a clearly major Support/Resistance or key Fib zone; if exception applies, you MUST label "Counter-trend (Risky)" and reduce confidence.
-3) If price is in No Man's Land (no clear value zone), output action = WAIT.
-4) Indicators (RSI/MACD/Stoch/MA/Volume) are CONFIRMATION only, not direction setters.
-5) Use only what exists in DB context. If missing critical TFs for safe call, set request_update_for_tf accordingly.
-
-*** MODE-SPECIFIC GUIDANCE ***
-- SCALP: prioritize precise trigger on LTF, tight invalidation, quick TP; still filter by HTF bias.
-- SWING: prioritize HTF structure/value; TP wider; trigger can be from H1/M30.
-
-*** CHAIN-OF-THOUGHT RULE ***
-Think step-by-step internally, but do NOT reveal internal chain-of-thought. Output only the JSON below.
-In reasoning_trace, provide SHORT bullet summary derived from PRIORITY 1/2/3 (not hidden reasoning).
-
-*** OUTPUT FORMAT (JSON ONLY) ***
-{
-  "mode": "SCALP|SWING",
-  "tfs_used_for_confluence": ["1D","H4","H1","M15"],
-  "request_update_for_tf": ["1D"] | null,
-  "reasoning_trace": [
-    "P1 Structure: ...",
-    "P2 Value: ...",
-    "P3 Trigger: ..."
-  ],
-  "trade_plan": {
-    "action": "BUY|SELL|WAIT|HOLD",
-    "entry_zone": "...",
-    "target_price": "...",
-    "stop_loss": "...",
-    "confidence": "High|Medium|Low",
-    "probability_pct": 0
-  },
-  "risk_notes": [
-    "..."
-  ],
-  "user_response_text": "Generate a concise Thai response:\\n\\n⚡ **โหมด:** ${modeThai}\\n📢 **สถานะ:** [ACTION] (Confidence/Probability)\\n📚 **TF ที่ใช้:** ...\\n\\n🔍 **Top-Down:**\\n1️⃣ Structure: ...\\n2️⃣ Value: ...\\n3️⃣ Trigger: ...\\n\\n🎯 **Setup:**\\n- **Entry:** ...\\n- **TP:** ...\\n- **SL:** ...\\n\\n💡 **สรุป:** ...\\n⚠️ **ความเสี่ยง:** ..."
-}
-      `.trim()
+      text: baseText
     }]
   };
 
@@ -536,7 +447,7 @@ In reasoning_trace, provide SHORT bullet summary derived from PRIORITY 1/2/3 (no
 
 export async function analyzeDBStructured(userId, dbRows, env, options = {}) {
   const modelId = getModelId(env);
-  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${env.GEMINI_API_KEY}`;
+  const apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/' + modelId + ':generateContent?key=' + env.GEMINI_API_KEY;
 
   // Build compact DB context (HTF -> LTF)
   const rows = (dbRows || []).slice().sort((a, b) => TF_ORDER.indexOf(normalizeTF(a.tf)) - TF_ORDER.indexOf(normalizeTF(b.tf)));
@@ -544,12 +455,12 @@ export async function analyzeDBStructured(userId, dbRows, env, options = {}) {
     const d = r.data || JSON.parse(r.analysis_json || '{}');
     const tf = normalizeTF(r.tf);
     const fresh = (r.isFresh === undefined) ? true : !!r.isFresh;
-    return `[TF ${tf}] ${fresh ? '🟢 Fresh' : '🔴 Stale'} | Updated=${r.timestamp_readable || '-'} | Trend=${d.trend_bias || '-'} | Entry=${(d.trade_setup||{}).entry_zone || '-'} | TP=${(d.trade_setup||{}).target_price || '-'} | SL=${(d.trade_setup||{}).stop_loss || '-'}`;
+    return '[TF ' + tf + '] ' + (fresh ? '🟢 Fresh' : '🔴 Stale') + ' | Updated=' + (r.timestamp_readable || '-') + ' | Trend=' + (d.trend_bias || '-') + ' | Entry=' + ((d.trade_setup||{}).entry_zone || '-') + ' | TP=' + ((d.trade_setup||{}).target_price || '-') + ' | SL=' + ((d.trade_setup||{}).stop_loss || '-');
   }).join('\n');
 
   const instruction = {
     role: 'user',
-    parts: [{ text: `Role: Expert Technical Analyst (Thai).\nTask: Re-evaluate the provided DB state for each TF listed below.\nDo NOT invent prices. Use only the given DB values. For large TFs (H4/1D/1W) you MAY request an update by returning them in request_update_for_tf.\n\nDB CONTEXT:\n${lines}\n\nOUTPUT: Return JSON ONLY with shape:\n{ "results": [ { "detected_tf": "M15", "tfs_used_for_confluence": ["H4","H1"], "request_update_for_tf": null|[...], "reasoning_trace": [...], "detailed_technical_data": {...}, "user_response_text": "..." } ] }` }]
+    parts: [{ text: 'Role: Expert Technical Analyst (Thai).\nTask: Re-evaluate the provided DB state for each TF listed below.\nDo NOT invent prices. Use only the given DB values. For large TFs (H4/1D/1W) you MAY request an update by returning them in request_update_for_tf.\n\nDB CONTEXT:\n' + lines + '\n\nOUTPUT: Return JSON ONLY with shape:\n{ "results": [ { "detected_tf": "M15", "tfs_used_for_confluence": ["H4","H1"], "request_update_for_tf": null|[...], "reasoning_trace": [...], "detailed_technical_data": {...}, "user_response_text": "..." } ] }' }]
   };
 
   const payload = { contents: [instruction], generationConfig: { temperature: 0.2, maxOutputTokens: Number(env.AI_MAX_OUTPUT_TOKENS || 1600) } };
@@ -621,7 +532,7 @@ export async function reanalyzeFromDB(userId, env, requestUrl) {
         if (Array.isArray(r.request_update_for_tf) && r.request_update_for_tf.length > 0) {
           toStore.trade_setup = { ...(toStore.trade_setup || {}), action: 'WAIT', confidence: 'Low' };
           const rt = Array.isArray(toStore.reasoning_trace) ? toStore.reasoning_trace : [];
-          rt.push(`Decision: WAIT (ต้องการภาพ TF เพิ่มเติม: ${r.request_update_for_tf.join(', ')})`);
+          rt.push('Decision: WAIT (ต้องการภาพ TF เพิ่มเติม: ' + r.request_update_for_tf.join(', ') + ')');
           toStore.reasoning_trace = rt;
         }
 
