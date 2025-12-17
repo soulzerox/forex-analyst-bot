@@ -147,7 +147,8 @@ export async function handleEvent(event, env, ctx, requestUrl) {
       await replyText(replyToken, ackMsg, env, mainMenu);
 
       // Trigger background analysis asynchronously (will cache image in KV from there)
-      triggerAsyncJobProcessing(userId, requestUrl, env)
+      // Pass ctx so the fetch trigger gets properly awaited
+      triggerAsyncJobProcessing(userId, requestUrl, env, ctx)
         .catch(e => console.error("Failed to trigger initial analysis:", safeError(e)));
 
       return;
@@ -283,14 +284,30 @@ export async function handleSummaryMenuRequest(userId, replyToken, env) {
     return;
   }
 
-  // Unique TF list, ordered by TF hierarchy
+  // Unique TF list, ordered by TF hierarchy, and filter out EXPIRED data
   const unique = new Map();
+  const now = Date.now();
+  
   rows.forEach(r => {
     const tf = normalizeTF(r.tf);
     // Hide internal markers (e.g., _JOB) from the visible summary menu
     if (String(tf || '').startsWith('_')) return;
-    if (!unique.has(tf)) unique.set(tf, r.timestamp);
+    
+    // Check if this TF data has expired
+    const maxAge = TF_VALIDITY_MS[tf] || (24 * 60 * 60 * 1000); // Default to 24 hours
+    const ageMs = now - Number(r.timestamp || 0);
+    const isFresh = ageMs <= maxAge;
+    
+    // Only show fresh (non-expired) TF data
+    if (isFresh && !unique.has(tf)) {
+      unique.set(tf, r.timestamp);
+    }
   });
+
+  if (unique.size === 0) {
+    await replyText(replyToken, "❌ ข้อมูลทั้งหมดหมดอายุแล้วครับ\n\n📸 กรุณาส่งรูปกราฟใหม่เข้ามา", env, mainMenu);
+    return;
+  }
 
   const tfList = [...unique.keys()].sort((a, b) => TF_ORDER.indexOf(a) - TF_ORDER.indexOf(b));
   const quickReplyItems = tfList.map(tf => ({
@@ -392,6 +409,20 @@ export async function handleSummaryTFRequest(userId, targetTF, replyToken, env) 
 
   if (!row) {
     await replyText(replyToken, `ยังไม่มีข้อมูล TF: ${targetTF}`, env, mainMenu);
+    return;
+  }
+
+  // Check if data has expired
+  const maxAge = TF_VALIDITY_MS[targetTF] || (24 * 60 * 60 * 1000);
+  const ageMs = Date.now() - Number(row.timestamp || 0);
+  
+  if (ageMs > maxAge) {
+    await replyText(
+      replyToken,
+      `❌ ข้อมูล TF: ${targetTF} หมดอายุแล้วครับ\n\n📸 กรุณาส่งรูปกราฟใหม่เข้ามาเพื่ออัปเดต`,
+      env,
+      mainMenu
+    );
     return;
   }
 
@@ -518,7 +549,9 @@ export async function triggerInternalAnalyze(userId, requestUrl, env) {
 
 // ✅ NEW: Async trigger that returns immediately without waiting
 // This allows job processing to happen without blocking the main request
-async function triggerAsyncJobProcessing(userId, requestUrl, env) {
+// IMPORTANT: We use ctx.waitUntil() ONLY for the fetch trigger itself (very fast)
+// Not for the actual analysis, which happens in a separate worker invocation
+async function triggerAsyncJobProcessing(userId, requestUrl, env, ctx) {
   try {
     const u = new URL(requestUrl);
     u.search = '';
@@ -529,13 +562,21 @@ async function triggerAsyncJobProcessing(userId, requestUrl, env) {
       headers['X-Internal-Task-Token'] = env.INTERNAL_TASK_TOKEN;
     }
 
-    // Fire-and-forget: Don't await the fetch, just trigger it
-    // This returns immediately without blocking
-    fetch(u.toString(), {
+    // Create the fetch promise
+    const fetchPromise = fetch(u.toString(), {
       method: 'POST',
       headers,
       body: JSON.stringify({ userId })
     }).catch(e => console.error("Async job processing trigger failed:", safeError(e)));
+
+    // If ctx is available, wrap in waitUntil to ensure fetch gets triggered
+    // This is safe because the fetch itself is very fast (just HTTP request)
+    if (ctx && ctx.waitUntil) {
+      ctx.waitUntil(fetchPromise);
+    } else {
+      // Fallback if ctx not available
+      console.warn("ctx not available in triggerAsyncJobProcessing, fetch may not complete");
+    }
   } catch (e) {
     console.error("Failed to setup async job processing:", safeError(e));
   }
