@@ -142,21 +142,11 @@ export async function handleEvent(event, env, ctx, requestUrl) {
       // Enqueue this image for FIFO processing (allows users to send multiple images continuously)
       const { jobId, createdAt } = await enqueueAnalysisJob(userId, messageId, env);
 
-      // Cache image in KV for timeout recovery & retry capability
-      ctx.waitUntil((async () => {
-        try {
-          const { arrayBuffer: imageBinary, contentType } = await getContentFromLine(messageId, env);
-          const base64Image = arrayBufferToBase64(imageBinary);
-          await saveImageToKV(env.ANALYSIS_KV, userId, jobId, base64Image, contentType, 0);
-        } catch (err) {
-          console.warn(`Failed to cache image to KV for job ${jobId}:`, safeError(err));
-        }
-      })());
-
       const ackMsg = await buildQueueAckMessage(userId, jobId, createdAt, env);
 
       await replyText(replyToken, ackMsg, env, mainMenu);
 
+      // Trigger background analysis (will cache image in KV from there)
       await triggerInternalAnalyze(userId, requestUrl, env);
 
       return;
@@ -586,6 +576,14 @@ export async function handleInternalAnalyze(request, env, ctx) {
     try {
       const { arrayBuffer: imageBinary, contentType } = await getContentFromLine(job.message_id, env);
       const base64Image = arrayBufferToBase64(imageBinary);
+
+      // Cache image in KV for timeout recovery & retry capability (done here with ample background time)
+      try {
+        await saveImageToKV(env.ANALYSIS_KV, userId, job.job_id, base64Image, contentType, 0);
+      } catch (kvErr) {
+        console.warn(`[Job ${job.job_id}] Failed to cache image to KV:`, safeError(kvErr));
+        // Continue anyway - KV is optional for recovery, not critical
+      }
 
       const existingRows = (await getAllAnalyses(userId, env)).filter(r => !String(r.tf || '').startsWith('_'));
       const controller = new AbortController();

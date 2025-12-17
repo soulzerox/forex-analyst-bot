@@ -36,13 +36,13 @@ compatibility_flags = ["global_fetch_strictly_public", "nodejs_compat"]
 # EST_SECONDS_PER_IMAGE - Estimated seconds per image for queue ETA (optional, default: 30)
 
 # For D1 database
-#[[d1_databases]]
-#binding = "DB"
-#database_name = ""
-#database_id = ""  # Fill in your D1 database ID
+[[d1_databases]]
+binding = "DB"
+database_name = "forexanalyze"
+database_id = "9412eca8-24a4-4281-a518-63ecd08bcc8a"  # Fill in your D1 database ID
 
 # For Workers KV - image cache and analysis state storage
-#[[kv_namespaces]]
-#binding = "ANALYSIS_KV"
-#id = ""  # Replace with your KV namespace ID
-#preview_id = ""  # Replace with your KV preview namespace ID
+[[kv_namespaces]]
+binding = "ANALYSIS_KV"
+id = "71a8015aff62487fb8ee73005d01f6b7"  # Replace with your KV namespace ID
+preview_id = "71a8015aff62487fb8ee73005d01f6b7"  # Replace with your KV preview namespace ID
