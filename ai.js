@@ -1,4 +1,4 @@
-import { getModelId, safeParseJsonLoosely, promiseWithTimeout, normalizeTF, selectSmartContextRows } from './utils.js';
+import { getModelId, safeParseJsonLoosely, promiseWithTimeout, normalizeTF, selectSmartContextRows, inferLikelyCurrentTF } from './utils.js';
 import { TF_VALIDITY_MS, TF_ORDER } from './config.js';
 import { getAllAnalyses, saveAnalysis } from './database.js';
 
