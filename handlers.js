@@ -146,8 +146,9 @@ export async function handleEvent(event, env, ctx, requestUrl) {
 
       await replyText(replyToken, ackMsg, env, mainMenu);
 
-      // Trigger background analysis (will cache image in KV from there)
-      await triggerInternalAnalyze(userId, requestUrl, env);
+      // Trigger background analysis asynchronously (will cache image in KV from there)
+      triggerAsyncJobProcessing(userId, requestUrl, env)
+        .catch(e => console.error("Failed to trigger initial analysis:", safeError(e)));
 
       return;
     }
@@ -515,6 +516,32 @@ export async function triggerInternalAnalyze(userId, requestUrl, env) {
   }
 }
 
+// ✅ NEW: Async trigger that returns immediately without waiting
+// This allows job processing to happen without blocking the main request
+async function triggerAsyncJobProcessing(userId, requestUrl, env) {
+  try {
+    const u = new URL(requestUrl);
+    u.search = '';
+    u.searchParams.set('__internal', 'analyze');
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (env.INTERNAL_TASK_TOKEN) {
+      headers['X-Internal-Task-Token'] = env.INTERNAL_TASK_TOKEN;
+    }
+
+    // Fire-and-forget: Don't await the fetch, just trigger it
+    // This returns immediately without blocking
+    fetch(u.toString(), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ userId })
+    }).catch(e => console.error("Async job processing trigger failed:", safeError(e)));
+  } catch (e) {
+    console.error("Failed to setup async job processing:", safeError(e));
+  }
+}
+
+
 export async function handleInternalAnalyze(request, env, ctx) {
   // Optional protection
   if (env.INTERNAL_TASK_TOKEN) {
@@ -554,14 +581,16 @@ export async function handleInternalAnalyze(request, env, ctx) {
     return new Response('OK', { status: 200 });
   }
 
-  const internalTimeoutMs = Math.max(8000, Number(env.INTERNAL_AI_TIMEOUT_MS || 20000));
+  const internalTimeoutMs = Math.max(8000, Number(env.INTERNAL_AI_TIMEOUT_MS || 15000));
   const maxAttempts = Math.max(1, Number(env.INTERNAL_MAX_RETRY || 3));
   const attempt = Number(job.attempt || 0);
 
   const startedReadable = new Date(job.started_at).toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' });
 
   // Log timeout setting
-  console.log(`[Job ${job.job_id}] Starting analysis with timeout: ${internalTimeoutMs}ms (free-tier max: 30000ms)`);
+  // NOTE: Cloudflare free tier has 30s total timeout per request
+  // We use 15s for AI to leave 5-10s for image fetch + DB operations
+  console.log(`[Job ${job.job_id}] Starting analysis with timeout: ${internalTimeoutMs}ms (Cloudflare max: 30000ms total)`);
 
   // Write job marker for visibility (single row per-user)
   try {
@@ -581,13 +610,13 @@ export async function handleInternalAnalyze(request, env, ctx) {
     console.error("Failed to write _JOB marker:", safeError(e));
   }
 
-  // ✅ CRITICAL: Wrap background analysis in ctx.waitUntil() to prevent premature worker termination
-  // Cloudflare Workers will kill async operations when response is sent unless wrapped in ctx.waitUntil()
+  // ✅ CRITICAL: Return immediately WITHOUT ctx.waitUntil()
+  // Why: ctx.waitUntil has a 30-second timeout on Cloudflare free tier, which isn't enough for AI analysis
+  // Solution: Trigger async processing via separate fetch that returns immediately
+  // This allows multiple jobs to be processed sequentially without timeout conflicts
   const requestUrl = request.url;
-  ctx.waitUntil(
-    performAnalysisInBackground(userId, job, internalTimeoutMs, maxAttempts, env, requestUrl)
-      .catch(e => console.error("Background analysis failed:", safeError(e)))
-  );
+  triggerAsyncJobProcessing(userId, requestUrl, env)
+    .catch(e => console.error("Async job trigger failed:", safeError(e)));
 
   return new Response('ACCEPTED', { status: 202 });
 }
@@ -733,7 +762,8 @@ async function performAnalysisInBackground(userId, job, internalTimeoutMs, maxAt
               retryReadable
             }, env);
 
-            await triggerInternalAnalyze(userId, requestUrl, env);
+            triggerAsyncJobProcessing(userId, requestUrl, env)
+              .catch(e => console.error("Failed to trigger retry job:", safeError(e)));
             shouldContinueToStorage = false;
           } else {
             // non-retryable / exceeded attempts
@@ -823,9 +853,10 @@ async function performAnalysisInBackground(userId, job, internalTimeoutMs, maxAt
       await cleanupAnalysisFromKV(env.ANALYSIS_KV, userId, job.job_id);
       console.log(`[Job ${job.job_id}] Cleaned up KV cache and state`);
 
-      // If more jobs queued, continue chain
+      // If more jobs queued, trigger next job asynchronously (non-blocking)
       if (stats.queued_count > 0) {
-        await triggerInternalAnalyze(userId, requestUrl, env);
+        triggerAsyncJobProcessing(userId, requestUrl, env)
+          .catch(e => console.error("Failed to trigger next job:", safeError(e)));
       }
     } catch (e) {
       console.error("Background analysis failed:", safeError(e));
@@ -843,7 +874,8 @@ async function performAnalysisInBackground(userId, job, internalTimeoutMs, maxAt
         }, env);
 
         if (await hasQueuedJobs(userId, env)) {
-          await triggerInternalAnalyze(userId, requestUrl, env);
+          triggerAsyncJobProcessing(userId, requestUrl, env)
+            .catch(e => console.error("Failed to trigger next job after error:", safeError(e)));
         }
       } catch (e2) {
         console.error("Failed to update _JOB marker (error):", safeError(e2));
