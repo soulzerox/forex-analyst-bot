@@ -21,7 +21,7 @@ export function createFallbackAnalysis(userId, detectedTf) {
   };
 }
 
-// --- CORE ANALYSIS (UPDATED FOR TOP-DOWN) ---
+// --- CORE ANALYSIS (UPDATED FOR TOP-DOWN + FRESHNESS AWARENESS) ---
 
 export async function analyzeChartStructured(userId, base64Image, existingRows, env, options = {}) {
   const modelId = getModelId(env);
@@ -29,30 +29,43 @@ export async function analyzeChartStructured(userId, base64Image, existingRows, 
   const signal = options.signal;
   const mimeType = options.mimeType || 'image/jpeg';
 
-  // 1) FILTER STALE DATA
-  const validRows = (existingRows || []).filter(row => {
-    const maxAge = TF_VALIDITY_MS[row.tf];
-    if (!maxAge) return true;
-    const age = Date.now() - row.timestamp;
-    return age <= maxAge;
+  // 1) ENRICH WITH FRESHNESS INFO (like trade style)
+  const enrichedRows = (existingRows || []).map(row => {
+    const tf = normalizeTF(row.tf);
+    const maxAge = TF_VALIDITY_MS[tf] || (24 * 60 * 60 * 1000);
+    const ageMs = Date.now() - Number(row.timestamp || 0);
+    const isFresh = ageMs <= maxAge;
+    const freshnessPercent = Math.max(0, Math.min(100, Math.round((1 - ageMs / maxAge) * 100)));
+    const ageMins = Math.floor(ageMs / 60000);
+    return {
+      ...row,
+      tf,
+      isFresh,
+      freshnessPercent,
+      ageMins
+    };
   });
 
-  // 2) SMART CONTEXT (reduce noise): send only relevant Parent TF chain
+  // 2) FILTER VALID (FRESH) DATA
+  const validRows = enrichedRows.filter(row => row.isFresh);
+
+  // 3) SMART CONTEXT (reduce noise): send only relevant Parent TF chain
   const likelyTf = inferLikelyCurrentTF(validRows);
   const contextRows = selectSmartContextRows(validRows, likelyTf);
 
-  // Prepare Context string
+  // Prepare Context string with FRESHNESS PERCENTAGES
   let existingContextStr = "No valid higher timeframe data available.";
   if (contextRows.length > 0) {
-    existingContextStr = "=== VALID EXISTING DATA (SMART CONTEXT: PARENT TFs ONLY) ===\n";
+    existingContextStr = "=== VALID EXISTING DATA (SMART CONTEXT: PARENT TFs ONLY WITH FRESHNESS) ===\n";
     existingContextStr += "Context selection based on last-updated TF: " + (likelyTf || 'Unknown') + "\n";
+    existingContextStr += "Freshness Scale: 🟢 >75% (Fresh) | 🟡 50-75% (Aging) | 🔴 <50% (Stale)\n";
     existingContextStr += "--------------------------------\n";
     contextRows.forEach(row => {
       const data = JSON.parse(row.analysis_json);
-      const ageMins = Math.floor((Date.now() - row.timestamp) / 60000);
+      const freshBadge = row.freshnessPercent >= 75 ? '🟢' : row.freshnessPercent >= 50 ? '🟡' : '🔴';
       existingContextStr += `
-        [TF: ${row.tf}]
-        - Updated: ${ageMins} mins ago
+        [TF: ${row.tf}] ${freshBadge} Freshness: ${row.freshnessPercent}%
+        - Updated: ${row.ageMins} mins ago
         - Trend Bias: ${data.trend_bias || 'Unknown'}
         - Setup Action: ${data.trade_setup?.action || 'N/A'}
         - Entry Zone: ${data.trade_setup?.entry_zone || 'N/A'}
@@ -62,14 +75,26 @@ export async function analyzeChartStructured(userId, base64Image, existingRows, 
     });
   }
 
-  // UPDATED SYSTEM PROMPT: Strict Top-Down + Hard Rules + CoT (internal)
+  // UPDATED SYSTEM PROMPT: Strict Top-Down + Hard Rules + Freshness Awareness + Dynamic Update Decision
   const systemInstruction = {
     role: "user",
     parts: [{ text: `
       Role: Expert Technical Analyst (Thai Language).
-      Methodology: Strict Top-Down Analysis (Structure -> Value -> Trigger) with Confluence.
+      Methodology: Strict Top-Down Analysis (Structure -> Value -> Trigger) with Confluence + Freshness Awareness.
 
       ${existingContextStr}
+
+      *** FRESHNESS & DYNAMIC UPDATE DECISION ***
+      Each Parent TF context shows freshness percentage (🟢/🟡/🔴):
+      - 🟢 >75%: Fresh, high confidence
+      - 🟡 50-75%: Aging, data may be changing
+      - 🔴 <50%: Stale, data likely outdated, market structure may have shifted
+
+      YOUR JOB on Freshness:
+      1) If a Parent TF (H4/1D for HTF bias) is <50% fresh, add it to "request_update_for_tf" for the user to re-upload.
+      2) If Parent TF is 50-75% fresh, proceed with analysis but add risk note: "HTF context may be aging - consider re-upload for confirmation".
+      3) If ALL Parent TFs are <30% fresh, default to WAIT with request_update_for_tf populated.
+      4) Prioritize: 1D > H4 > H1 for freshness requirements.
 
       *** HARD RULES (NON-NEGOTIABLE) ***
       1) **ห้ามเทรดสวนเทรนใหญ่ (HTF) เด็ดขาด** ไม่ว่าจะขาขึ้นหรือขาลง
@@ -81,9 +106,10 @@ export async function analyzeChartStructured(userId, base64Image, existingRows, 
 
       *** ANALYSIS LOGIC (HIERARCHY OF IMPORTANCE) ***
 
-      1. PRIORITY 1: Market Structure (Big Picture)
+      1. PRIORITY 1: Market Structure (Big Picture) + Freshness Check
          - Identify TF of the NEW image first.
          - Read Smart Context for Parent TFs (e.g., H4 for M15/M5; 1D for H4; etc.).
+         - CHECK FRESHNESS: If critical HTF is <50% fresh, flag for update.
          - Determine Main Bias (HH/HL = Up, LH/LL = Down, else Sideway).
          - Conflict Check: if signals conflict with Parent TF => default WAIT unless exception (Hard Rule #2).
 
@@ -98,11 +124,13 @@ export async function analyzeChartStructured(userId, base64Image, existingRows, 
       *** ACCURACY / ANTI-HALLUCINATION ***
       - If any value cannot be read from the image with confidence, use null or "unknown" (do NOT guess).
       - Think step-by-step internally (CoT) to reduce mistakes, but do NOT output your private step-by-step reasoning.
-      - Instead, fill "reasoning_trace" with concise bullet points referencing PRIORITY 1/2/3 evidence and the decision.
+      - Instead, fill "reasoning_trace" with concise bullet points referencing PRIORITY 1/2/3 evidence, freshness concerns, and the decision.
 
       *** OUTPUT INSTRUCTION ***
       - Identify detected TF.
       - List ALL Timeframes used in this analysis (Current + From Smart Context).
+      - Include freshness assessment in reasoning_trace.
+      - Populate request_update_for_tf if Parent TFs are aging (<50% fresh).
       - Provide Thai response strictly following Top-Down logic and Hard Rules.
       - Store detailed data (P1/P2/P3 extraction) in detailed_technical_data for reuse by other TF.
 
@@ -167,23 +195,7 @@ export async function analyzeChartStructured(userId, base64Image, existingRows, 
             "notes": ""
           }
         },
-        "user_response_text": "Generate a concise Thai response using this format:
-
-📢 **สถานะ: [ACTION] (Confidence Level)**
-⏱️ **TF ปัจจุบัน:** [Detected TF]
-📚 **ข้อมูลประกอบ (Confluence):** [List TFs used]
-
-🔍 **Top-Down Analysis:**
-1️⃣ **Structure (ภาพใหญ่):** [HTF bias + current structure + conflict/warning]
-2️⃣ **Area of Value:** [Key Levels/Fib/S-R]
-3️⃣ **Entry Trigger:** [Patterns/Indicators confirming]
-
-🎯 **Setup:**
-- **Entry:** [Zone]
-- **TP:** [Target]
-- **SL:** [Stop]
-
-💡 **สรุป:** [Confluence + Counter-trend risk or why WAIT]."
+        "user_response_text": "IMPORTANT: Output THAI LANGUAGE ONLY. Use EXACTLY this format below. Keep summary (สรุป) concise (10-20 sentences max). Do NOT output reasoning steps or internal thinking - AI should think privately.\n\n📢 **สถานะ: [ACTION] (Confidence Level)**\n⏱️ **TF ปัจจุบัน:** [Detected TF]\n📚 **ข้อมูลประกอบ (Confluence):** [List TFs used separated by comma]\n\n🔍 **Top-Down Analysis:**\n1️⃣ **Structure (ภาพใหญ่):** [State HTF bias clearly, current structure HH/HL/LH/LL, any conflict with HTF]\n2️⃣ **Area of Value:** [Key support/resistance levels, Fib zones if at one, or confirm \"No Man's Land\" if not]\n3️⃣ **Entry Trigger:** [Candlestick patterns, indicator confirmation, divergence if present]\n\n🎯 **Setup:**\n- **Entry:** [Price zone]\n- **TP:** [Target price]\n- **SL:** [Stop loss]\n\n💡 **สรุป:** [Confluence strength + any counter-trend risk warning OR reason for WAIT. Keep to 10-20 sentences max. Concise actionable summary only.]"
       `
     }]
   };
@@ -308,11 +320,11 @@ export async function chatWithGeminiText(userId, userText, env) {
     marketState = '=== CURRENT MARKET STATE ===\nNo technical data available in database.\nUser must upload charts first.\n================================';
 }
 
-  // 6) LLM Response Generation (Hard Rules + DB-first)
+  // 6) LLM Response Generation (Hard Rules + DB-first + Thai-only output)
   const payload = {
     contents: [{
       role: "user",
-      parts: [{ text: 'Role: Assistant Trader & Technical Analyst (Thai Language).\n\n' + marketState + '\n\nUser Question: "' + userText + '"\n\nHard Rules:\n- Answer strictly based on the Database state above (no hallucinated prices/trends).\n- Respect Top-Down: do not recommend counter-trend against the highest available Parent TF bias, unless the DB explicitly shows price at a major HTF key level + clear reversal trigger.\n- If data is missing/stale for any critical TF to answer safely, ask the user to upload that TF.\n\nOutput format:\n- Provide a short "🧠 ขั้นคิด (สรุปเป็นขั้น)" explaining how you used the DB (P1->P2->P3).\n- Then provide the final answer in Thai (concise, actionable).\n      ' }]
+      parts: [{ text: 'Role: Assistant Trader & Technical Analyst (Thai Language ONLY - NO ENGLISH).\n\n' + marketState + '\n\nUser Question: "' + userText + '"\n\nHard Rules:\n- Answer STRICTLY in Thai language only. NO English at all.\n- Answer strictly based on the Database state above (no hallucinated prices/trends).\n- Respect Top-Down: do not recommend counter-trend against the highest available Parent TF bias, unless the DB explicitly shows price at a major HTF key level + clear reversal trigger.\n- If data is missing/stale for any critical TF to answer safely, ask the user to upload that TF.\n\nOutput format:\n- Provide answer in Thai only (concise, actionable, no internal reasoning steps).\n- Think the analysis internally, output only the conclusion.\n- Use emoji for clarity (🔍 🎯 ⚠️ etc.)\n      ' }]
     }],
     generationConfig: {
       temperature: 0.2,
@@ -406,9 +418,14 @@ export function buildTradeStyleContext(enrichedSelected, mode) {
     const trigger = detailed.trigger || d.trigger || {};
     const indicators = detailed.indicators || d.indicators || {};
 
-    // Keep compact to reduce token usage
+    // Keep compact to reduce token usage, include freshness percentage
+    const freshnessBadge = (x.freshnessPercent !== undefined) 
+      ? (x.freshnessPercent >= 75 ? '🟢 ' + x.freshnessPercent + '%' : x.freshnessPercent >= 50 ? '🟡 ' + x.freshnessPercent + '%' : '🔴 ' + x.freshnessPercent + '%')
+      : (x.isFresh ? '🟢 Fresh' : '🔴 Stale');
+    const recommendStr = (x.recommendUpdate) ? ' [REQUEST UPDATE]' : '';
+    
     return [
-      '[TF ' + x.tf + '] ' + (x.isFresh ? '🟢 Fresh' : '🔴 Stale') + ' | Age=' + x.ageMins + 'm | Updated=' + (x.timestamp_readable || '-'),
+      '[TF ' + x.tf + '] ' + freshnessBadge + ' | Age=' + x.ageMins + 'm | Updated=' + (x.timestamp_readable || '-') + recommendStr,
       '- TrendBias: ' + (d.trend_bias || detailed.trend_bias || '-'),
       '- Structure: ' + JSON.stringify(structure || {}).slice(0, 380),
       '- Value: ' + JSON.stringify(value || {}).slice(0, 380),
@@ -428,7 +445,7 @@ export async function analyzeTradeStyleWithGemini(mode, contextStr, env) {
 
   const modeThai = (mode === 'SCALP') ? 'เล่นสั้น (Scalp)' : 'เล่นสวิง (Swing)';
 
-  const baseText = '\nRole: Expert Technical Analyst (Thai).\nTask: Create a trading plan for mode = "' + modeThai + '" using ONLY the DB context provided.\nMethodology: Strict Top-Down (Structure -> Value -> Trigger) + Confluence.\n\n' + contextStr + '\n\n*** HARD RULES (MUST FOLLOW) ***\n1) Strict Top-Down: Direction must follow Higher TF (1D/H4) first.\n2) No counter-trend trades. Exception ONLY when price is at a clearly major Support/Resistance or key Fib zone; if exception applies, you MUST label "Counter-trend (Risky)" and reduce confidence.\n3) If price is in No Man\'s Land (no clear value zone), output action = WAIT.\n4) Indicators (RSI/MACD/Stoch/MA/Volume) are CONFIRMATION only, not direction setters.\n5) Use only what exists in DB context. If missing critical TFs for safe call, set request_update_for_tf accordingly.\n\n*** MODE-SPECIFIC GUIDANCE ***\n- SCALP: prioritize precise trigger on LTF, tight invalidation, quick TP; still filter by HTF bias.\n- SWING: prioritize HTF structure/value; TP wider; trigger can be from H1/M30.\n\n*** CHAIN-OF-THOUGHT RULE ***\nThink step-by-step internally, but do NOT reveal internal chain-of-thought. Output only the JSON below.\nIn reasoning_trace, provide SHORT bullet summary derived from PRIORITY 1/2/3 (not hidden reasoning).\n\n*** OUTPUT FORMAT (JSON ONLY) ***\n{\n  "mode": "SCALP|SWING",\n  "tfs_used_for_confluence": ["1D","H4","H1","M15"],\n  "request_update_for_tf": ["1D"] | null,\n  "reasoning_trace": [\n    "P1 Structure: ...",\n    "P2 Value: ...",\n    "P3 Trigger: ..."\n  ],\n  "trade_plan": {\n    "action": "BUY|SELL|WAIT|HOLD",\n    "entry_zone": "...",\n    "target_price": "...",\n    "stop_loss": "...",\n    "confidence": "High|Medium|Low",\n    "probability_pct": 0\n  },\n  "risk_notes": [\n    "..."\n  ],\n  "user_response_text": "Generate a concise Thai response:\\n\\n⚡ **โหมด:** ' + modeThai + '\\n📢 **สถานะ:** [ACTION] (Confidence/Probability)\\n📚 **TF ที่ใช้:** ...\\n\\n🔍 **Top-Down:**\\n1️⃣ Structure: ...\\n2️⃣ Value: ...\\n3️⃣ Trigger: ...\\n\\n🎯 **Setup:**\\n- **Entry:** ...\\n- **TP:** ...\\n- **SL:** ...\\n\\n💡 **สรุป:** ...\\n⚠️ **ความเสี่ยง:** ..."\n}\n      ';
+  const baseText = '\nRole: Expert Technical Analyst (Thai).\nTask: Create a trading plan for mode = "' + modeThai + '" using ONLY the DB context provided.\nMethodology: Strict Top-Down (Structure -> Value -> Trigger) + Confluence.\n\n' + contextStr + '\n\n*** FRESHNESS & UPDATE POLICY ***\nEach TF has a freshness percentage (shown as 🟢/🟡/🔴 %):\n- 🟢 (>75%): Fresh, high confidence\n- 🟡 (50-75%): Aging, use with caution\n- 🔴 (<50%): Stale, data may be outdated\n- [REQUEST UPDATE] flag: AI marked this TF as recommended for update\n\nYou MUST evaluate:\n1) If TF is <50% freshness and is CRITICAL for your decision (HTF bias, key structure, entry trigger), add to request_update_for_tf.\n2) If TF is <50% freshness but supporting only, you may proceed with caution (add to risk_notes).\n3) Priority: HTF (1D/H4) freshness > MTF (H1/M30) > LTF (M15/M5) for structure decisions.\n\n*** HARD RULES (MUST FOLLOW) ***\n1) Strict Top-Down: Direction must follow Higher TF (1D/H4) first.\n2) No counter-trend trades. Exception ONLY when price is at a clearly major Support/Resistance or key Fib zone; if exception applies, you MUST label "Counter-trend (Risky)" and reduce confidence.\n3) If price is in No Man\'s Land (no clear value zone), output action = WAIT.\n4) Indicators (RSI/MACD/Stoch/MA/Volume) are CONFIRMATION only, not direction setters.\n5) Use only what exists in DB context. If missing critical TFs for safe call, set request_update_for_tf accordingly.\n6) If critical HTF data is too stale (<30% freshness), prefer WAIT action with request_update_for_tf.\n\n*** MODE-SPECIFIC GUIDANCE ***\n- SCALP: prioritize precise trigger on LTF, tight invalidation, quick TP; still filter by HTF bias. Ensure H1 is fresh (>50%).\n- SWING: prioritize HTF structure/value; TP wider; trigger can be from H1/M30. Ensure 1D/H4 is fresh (>50%).\n\n*** OUTPUT FORMAT (JSON ONLY + THAI LANGUAGE ONLY) ***\n{\n  "mode": "SCALP|SWING",\n  "tfs_used_for_confluence": ["1D","H4","H1","M15"],\n  "request_update_for_tf": ["1D", "H4"] | null,\n  "reasoning_trace": [\n    "P1 Structure: ... (freshness concern if any)",\n    "P2 Value: ...",\n    "P3 Trigger: ..."\n  ],\n  "trade_plan": {\n    "action": "BUY|SELL|WAIT|HOLD",\n    "entry_zone": "...",\n    "target_price": "...",\n    "stop_loss": "...",\n    "confidence": "High|Medium|Low",\n    "probability_pct": 0\n  },\n  "risk_notes": [\n    "Any data freshness concerns",\n    "Counter-trend warnings if applicable"\n  ],\n  "user_response_text": "CRITICAL: Output THAI LANGUAGE ONLY. Use exactly this format:\\n\\n⚡ **โหมด:** ' + modeThai + '\\n📢 **สถานะ:** [ACTION] (Confidence/Probability%)\\n📚 **TF ที่ใช้:** [List TFs]\\n\\n🔍 **Top-Down Analysis:**\\n1️⃣ **Structure (ภาพใหญ่):** [HTF bias, current structure, any conflict]\\n2️⃣ **Area of Value:** [Key levels/Fib zones]\\n3️⃣ **Entry Trigger:** [Patterns/Indicators]\\n\\n🎯 **Setup:**\\n- **Entry:** [Zone]\\n- **TP:** [Target]\\n- **SL:** [Stop]\\n\\n💡 **สรุป:** [Confluence strength + risk warnings. Max 10-20 sentences. Do NOT output reasoning steps - think privately.]"\n}\n      ';
 
   const instruction = {
     role: "user",

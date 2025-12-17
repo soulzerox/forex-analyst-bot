@@ -6,6 +6,34 @@ import { analyzeChartStructured, chatWithGeminiText, analyzeTradeStyleWithGemini
 import { getAllAnalyses, saveAnalysis, deleteAnalysis, updateAnalysisTF } from './database.js';
 import { enqueueAnalysisJob, buildQueueAckMessage, claimNextQueuedJob, requeueJob, markJobDone, markJobError, hasQueuedJobs, getUserQueueStats } from './queue.js';
 
+// --- HELPER: Enrich rows with freshness info & age recommendation ---
+function enrichRowsWithFreshness(rows) {
+  return (rows || []).map(r => {
+    const tf = normalizeTF(r.tf);
+    const maxAge = TF_VALIDITY_MS[tf] || (24 * 60 * 60 * 1000);
+    const ageMs = Date.now() - Number(r.timestamp || 0);
+    const isFresh = ageMs <= maxAge;
+    const freshnessPercent = Math.max(0, Math.min(100, Math.round((1 - ageMs / maxAge) * 100)));
+    const ageMins = Math.floor(ageMs / 60000);
+    
+    // Determine if update should be requested (AI will decide based on this)
+    // If freshness < 50%, recommend update
+    const recommendUpdate = freshnessPercent < 50;
+    
+    let data = {};
+    try { data = JSON.parse(r.analysis_json || '{}'); } catch (_) { data = {}; }
+    return {
+      ...r,
+      tf,
+      isFresh,
+      ageMins,
+      freshnessPercent,
+      recommendUpdate,
+      data
+    };
+  });
+}
+
 // --- EVENT HANDLER ---
 export async function handleEvent(event, env, ctx, requestUrl) {
   if (event.type !== 'message') return;
