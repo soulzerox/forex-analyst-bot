@@ -551,7 +551,8 @@ export async function triggerInternalAnalyze(userId, requestUrl, env) {
 // This allows job processing to happen without blocking the main request
 // IMPORTANT: We use ctx.waitUntil() ONLY for the fetch trigger itself (very fast)
 // Not for the actual analysis, which happens in a separate worker invocation
-async function triggerAsyncJobProcessing(userId, requestUrl, env, ctx) {
+// ctx is optional: provided from handleEvent (has ctx), but not from internal handlers
+async function triggerAsyncJobProcessing(userId, requestUrl, env, ctx = null) {
   try {
     const u = new URL(requestUrl);
     u.search = '';
@@ -571,11 +572,10 @@ async function triggerAsyncJobProcessing(userId, requestUrl, env, ctx) {
 
     // If ctx is available, wrap in waitUntil to ensure fetch gets triggered
     // This is safe because the fetch itself is very fast (just HTTP request)
+    // If not available (internal handlers), the fetch will still be triggered but may not complete
+    // if the worker times out - that's OK because it's a retry mechanism
     if (ctx && ctx.waitUntil) {
       ctx.waitUntil(fetchPromise);
-    } else {
-      // Fallback if ctx not available
-      console.warn("ctx not available in triggerAsyncJobProcessing, fetch may not complete");
     }
   } catch (e) {
     console.error("Failed to setup async job processing:", safeError(e));
@@ -656,7 +656,7 @@ export async function handleInternalAnalyze(request, env, ctx) {
   // Solution: Trigger async processing via separate fetch that returns immediately
   // This allows multiple jobs to be processed sequentially without timeout conflicts
   const requestUrl = request.url;
-  triggerAsyncJobProcessing(userId, requestUrl, env)
+  triggerAsyncJobProcessing(userId, requestUrl, env, ctx)
     .catch(e => console.error("Async job trigger failed:", safeError(e)));
 
   return new Response('ACCEPTED', { status: 202 });
